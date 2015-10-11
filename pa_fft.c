@@ -33,11 +33,13 @@
 #include <GL/gl.h>
 
 enum w_type {
-    WINDOW_TRIANGLE = 1,
+    WINDOW_TRIANGLE,
     WINDOW_HANNING,
     WINDOW_HAMMING,
     WINDOW_BLACKMAN,
     WINDOW_BLACKMAN_HARRIS,
+    WINDOW_WELCH,
+    WINDOW_FLAT,
 };
 
 struct pa_fft {
@@ -135,7 +137,7 @@ static inline void weights_init(float *dest, int samples, enum w_type w)
     switch(w) {
         case WINDOW_TRIANGLE:
             for (int i = 0; i < samples; i++)
-                dest[i] = i <= samples/2 ? i : -(samples - i);
+                dest[i] = 1 - 2*fabsf((i - ((samples - 1)/2.0f))/(samples - 1));
             break;
         case WINDOW_HANNING:
             for (int i = 0; i < samples; i++)
@@ -160,11 +162,24 @@ static inline void weights_init(float *dest, int samples, enum w_type w)
                 dest[i] = 0.35875 - 0.48829*c1 + 0.14128*c2 - 0.001168*c3;
             }
             break;
-        default:
+        case WINDOW_FLAT:
             for (int i = 0; i < samples; i++)
                 dest[i] = 1.0f;
             break;
+        case WINDOW_WELCH:
+            for (int i = 0; i < samples; i++)
+                dest[i] = 1 - pow((i - ((samples - 1)/2.0f))/((samples - 1)/2.0f), 2.0f);
+            break;
+        default:
+            for (int i = 0; i < samples; i++)
+                dest[i] = 0.0f;
+            break;
     }
+    float sum = 0.0f;
+    for (int i = 0; i < samples; i++)
+        sum += dest[i];
+    for (int i = 0; i < samples; i++)
+        dest[i] /= sum;
 }
 
 static inline void apply_win(double *dest, float *src, float *weights,
@@ -174,7 +189,7 @@ static inline void apply_win(double *dest, float *src, float *weights,
         dest[i] = src[i]*weights[i];
 }
 
-static inline float frame_average(float mag, float *buf, int avgs)
+static inline float frame_average(float mag, float *buf, int avgs, int no_mod)
 {
     if (!avgs)
         return mag;
@@ -182,6 +197,8 @@ static inline float frame_average(float mag, float *buf, int avgs)
     for (int i = 0; i < avgs; i++)
         val += buf[i];
     val /= avgs + 1;
+    if (no_mod)
+        return val;
     for (int i = avgs - 1; i > 0; i--)
         buf[i] = buf[i-1];
     buf[0] = mag;
@@ -228,10 +245,10 @@ void *pa_fft_thread(void *arg) {
         apply_win(t->buffer, t->pa_buf, weights, t->buffer_samples);
         fftw_execute(t->plan);
 
-        double freq_low, freq_disp, freq_range, freq_off;
+        double freq_low, freq_disp, freq_range, freq_off, mag_max = 0.0f;
         if (t->log_graph) {
-            freq_low = log((t->start_low*t->fft_fund_freq)/((float)t->ss.rate/2));
-            freq_disp = 1.0 - log((t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2));
+            freq_low = log10((t->start_low*t->fft_fund_freq)/((float)t->ss.rate/2));
+            freq_disp = 1.0 - log10((t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2));
             freq_range = (1.0 - freq_disp) - freq_low;
             freq_off = 0.0f;
         } else {
@@ -239,6 +256,13 @@ void *pa_fft_thread(void *arg) {
             freq_disp = 1.0 - (t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2);
             freq_range = (1.0 - freq_disp) - freq_low;
             freq_off = 1.0f;
+        }
+        for (int i = t->start_low; i < t->fft_memb; i++) {
+            fftw_complex num = t->output[i];
+            double mag = creal(num)*creal(num) + cimag(num)*cimag(num);
+            mag = log10(mag)/10;
+            mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 1);
+            mag_max = mag > mag_max ? mag : mag_max;
         }
 
         if (!t->no_refresh)
@@ -252,13 +276,13 @@ void *pa_fft_thread(void *arg) {
             double freq;
             fftw_complex num = t->output[i];
             if (t->log_graph)
-                freq = log((i*t->fft_fund_freq)/((float)t->ss.rate/2));
+                freq = log10((i*t->fft_fund_freq)/((float)t->ss.rate/2));
             else
                 freq = (i*t->fft_fund_freq)/((float)t->ss.rate/2);
             double mag = creal(num)*creal(num) + cimag(num)*cimag(num);
             mag = log10(mag)/10;
-            mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg);
-            glVertex2f((freq/freq_range + freq_disp/2)*2 - freq_off, mag);
+            mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 0);
+            glVertex2f((freq/freq_range + freq_disp/2)*2 - freq_off, mag + mag_max + 0.5f);
         }
         glEnd();
 
@@ -338,7 +362,8 @@ static inline void print_help()
     fprintf(stderr, "    -c (int)  Cut off low frequency coeffs (default = 1st coef onward)\n");
     fprintf(stderr, "    -s (int)  Amount of samples to use for transform (default = 1024)\n");
     fprintf(stderr, "    -w (str)  Specify windowing function (default = \"hanning\", possible values:\n");
-    fprintf(stderr, "                  \"triangle\" \"hanning\" \"hamming\" \"blackman\" \"blackman-harris\"\n");
+    fprintf(stderr, "                  \"triangle\" \"hanning\" \"hamming\" \"blackman\""
+                                      "\"blackman-harris\" \"welch\" \"flat\"\n");
     fprintf(stderr, "    -d (str)  Pulseaudio device\n");
     fprintf(stderr, "                  Specify using the name from \"pacmd list-sources | grep \"name:\"\"\n");
 }
@@ -405,6 +430,10 @@ int main(int argc, char *argv[])
                     ctx->win_type = WINDOW_BLACKMAN;
                 else if (!strcmp(optarg, "blackman-harris"))
                     ctx->win_type = WINDOW_BLACKMAN_HARRIS;
+                else if (!strcmp(optarg, "welch"))
+                    ctx->win_type = WINDOW_WELCH;
+                else if (!strcmp(optarg, "flat"))
+                    ctx->win_type = WINDOW_FLAT;
                 else
                     fprintf(stderr, "Unknown window \"%s\"\n", optarg);
                 break;
