@@ -330,7 +330,7 @@ static inline void print_help()
 {
     fprintf(stderr, "Usage: pa_fft <options>\n");
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "    -l        Logarithmic graph\n");
+    fprintf(stderr, "    -l        Linear (instead of logarithmic) graph\n");
     fprintf(stderr, "    -o        Use overlap\n");
     fprintf(stderr, "    -n        Do not clear window on every frame\n");
     fprintf(stderr, "    -h        Print this\n");
@@ -358,7 +358,7 @@ int main(int argc, char *argv[])
     ctx->height = 500;
     ctx->buffer_samples = 1024;
     ctx->dev = NULL;
-    ctx->log_graph = 0;
+    ctx->log_graph = 1;
     ctx->no_refresh = 0;
     ctx->overlap = 0;
     ctx->frame_avg = 2;
@@ -370,7 +370,7 @@ int main(int argc, char *argv[])
     while ((c = getopt (argc, argv, opt_str)) != -1) {
         switch (c) {
             case 'l':
-                ctx->log_graph = 1;
+                ctx->log_graph = 0;
                 break;
             case 'o':
                 ctx->overlap = 1;
