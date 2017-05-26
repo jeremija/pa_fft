@@ -44,7 +44,7 @@ enum w_type {
 
 struct pa_fft {
     pthread_t thread;
-    bool stop, log_graph, overlap, no_refresh;
+    bool stop, log_graph, overlap, no_refresh, oscilloscope;
     int cont;
 
     /* Pulse */
@@ -127,8 +127,9 @@ void deinit_fft(struct pa_fft *pa_fft) {
 
 static inline void avg_buf_init(struct pa_fft *pa_fft)
 {
-    pa_fft->frame_avg_mag = malloc(pa_fft->pa_samples*sizeof(float *));
-    for (int i = 0; i < pa_fft->pa_samples; i++)
+    int count = pa_fft->oscilloscope ? pa_fft->pa_samples : pa_fft->fft_memb;
+    pa_fft->frame_avg_mag = malloc(count*sizeof(float *));
+    for (int i = 0; i < count; i++)
         pa_fft->frame_avg_mag[i] = calloc(pa_fft->frame_avg, sizeof(float));
 }
 
@@ -228,13 +229,13 @@ void *pa_fft_thread(void *arg) {
             }
         }
 
-        /* if (t->overlap) */
-        /*     memcpy(&t->pa_buf[0], &t->pa_buf[t->pa_samples], */
-        /*            t->pa_samples*sizeof(float)); */
+        if (t->overlap)
+            memcpy(&t->pa_buf[0], &t->pa_buf[t->pa_samples],
+                   t->pa_samples*sizeof(float));
 
         pa_usec_t lag = pa_simple_get_latency(t->s, &t->error);
 
-        if (pa_simple_read(t->s, &t->pa_buf[0],
+        if (pa_simple_read(t->s, &t->pa_buf[t->overlap ? t->pa_samples : 0],
             t->pa_buf_size, &t->error) < 0) {
             fprintf(stderr, __FILE__": pa_simple_read() failed: %s\n",
                     pa_strerror(t->error));
@@ -242,28 +243,30 @@ void *pa_fft_thread(void *arg) {
             continue;
         }
 
-        /* apply_win(t->buffer, t->pa_buf, weights, t->buffer_samples); */
-        /* fftw_execute(t->plan); */
+        double freq_low = 0.0f, freq_disp = 0.0f, freq_range = 0.0f, freq_off = 0.0f, mag_max = 0.0f;
+        if (!t->oscilloscope) {
+            apply_win(t->buffer, t->pa_buf, weights, t->buffer_samples);
+            fftw_execute(t->plan);
 
-        /* double freq_low, freq_disp, freq_range, freq_off, mag_max = 0.0f; */
-        /* if (t->log_graph) { */
-        /*     freq_low = log10((t->start_low*t->fft_fund_freq)/((float)t->ss.rate/2)); */
-        /*     freq_disp = 1.0 - log10((t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2)); */
-        /*     freq_range = (1.0 - freq_disp) - freq_low; */
-        /*     freq_off = 0.0f; */
-        /* } else { */
-        /*     freq_low = (t->start_low*t->fft_fund_freq)/((float)t->ss.rate/2); */
-        /*     freq_disp = 1.0 - (t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2); */
-        /*     freq_range = (1.0 - freq_disp) - freq_low; */
-        /*     freq_off = 1.0f; */
-        /* } */
-        /* for (int i = t->start_low; i < t->fft_memb; i++) { */
-        /*     fftw_complex num = t->output[i]; */
-        /*     double mag = creal(num)*creal(num) + cimag(num)*cimag(num); */
-        /*     mag = log10(mag)/10; */
-        /*     mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 1); */
-        /*     mag_max = mag > mag_max ? mag : mag_max; */
-        /* } */
+            if (t->log_graph) {
+                freq_low = log10((t->start_low*t->fft_fund_freq)/((float)t->ss.rate/2));
+                freq_disp = 1.0 - log10((t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2));
+                freq_range = (1.0 - freq_disp) - freq_low;
+                freq_off = 0.0f;
+            } else {
+                freq_low = (t->start_low*t->fft_fund_freq)/((float)t->ss.rate/2);
+                freq_disp = 1.0 - (t->fft_memb*t->fft_fund_freq)/((float)t->ss.rate/2);
+                freq_range = (1.0 - freq_disp) - freq_low;
+                freq_off = 1.0f;
+            }
+            for (int i = t->start_low; i < t->fft_memb; i++) {
+                fftw_complex num = t->output[i];
+                double mag = creal(num)*creal(num) + cimag(num)*cimag(num);
+                mag = log10(mag)/10;
+                mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 1);
+                mag_max = mag > mag_max ? mag : mag_max;
+            }
+        }
 
         if (!t->no_refresh)
             glClear(GL_COLOR_BUFFER_BIT);
@@ -272,22 +275,26 @@ void *pa_fft_thread(void *arg) {
             glColor3f(255.0,255.0,255.0);
         else
             glColor3f(255.0,0.0,0.0);
-        /* for (int i = t->start_low; i < t->fft_memb; i++) { */
-        /*     double freq; */
-        /*     fftw_complex num = t->output[i]; */
-        /*     if (t->log_graph) */
-        /*         freq = log10((i*t->fft_fund_freq)/((float)t->ss.rate/2)); */
-        /*     else */
-        /*         freq = (i*t->fft_fund_freq)/((float)t->ss.rate/2); */
-        /*     double mag = creal(num)*creal(num) + cimag(num)*cimag(num); */
-        /*     mag = log10(mag)/10; */
-        /*     mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 0); */
-        /*     glVertex2f((freq/freq_range + freq_disp/2)*2 - freq_off, mag + mag_max + 0.5f); */
-        /* } */
-        for (int i = 0; i < t->pa_samples; i++) {
-            float mag = t->pa_buf[i];
-            mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 0);
-            glVertex2f((float) i / t->pa_samples * 2 - 1, (float) mag * 10);
+
+        if (!t->oscilloscope) {
+            for (int i = t->start_low; i < t->fft_memb; i++) {
+                double freq;
+                fftw_complex num = t->output[i];
+                if (t->log_graph)
+                    freq = log10((i*t->fft_fund_freq)/((float)t->ss.rate/2));
+                else
+                    freq = (i*t->fft_fund_freq)/((float)t->ss.rate/2);
+                double mag = creal(num)*creal(num) + cimag(num)*cimag(num);
+                mag = log10(mag)/10;
+                mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 0);
+                glVertex2f((freq/freq_range + freq_disp/2)*2 - freq_off, mag + mag_max + 0.5f);
+            }
+        } else {
+            for (int i = 0; i < t->pa_samples; i++) {
+                float mag = t->pa_buf[i];
+                mag = frame_average(mag, t->frame_avg_mag[i], t->frame_avg, 0);
+                glVertex2f((double) i / t->pa_samples * 2 - 1, (double) mag * 10);
+            }
         }
         glEnd();
 
@@ -370,6 +377,7 @@ static inline void print_help()
     fprintf(stderr, "                  \"triangle\" \"hanning\" \"hamming\" \"blackman\""
                                       "\"blackman-harris\" \"welch\" \"flat\"\n");
     fprintf(stderr, "    -d (str)  Pulseaudio device\n");
+    fprintf(stderr, "    -p (str)  Show oscilloscope instead of FFT\n");
     fprintf(stderr, "                  Specify using the name from \"pacmd list-sources | grep \"name:\"\"\n");
 }
 
@@ -396,7 +404,7 @@ int main(int argc, char *argv[])
     ctx->win_type = WINDOW_BLACKMAN_HARRIS;
     ctx->fft_flags = FFTW_PATIENT | FFTW_DESTROY_INPUT;
 
-    const char *opt_str = "lonhd:a:c:s:w:";
+    const char *opt_str = "lonhd:a:c:s:w:p";
     while ((c = getopt (argc, argv, opt_str)) != -1) {
         switch (c) {
             case 'l':
@@ -423,6 +431,9 @@ int main(int argc, char *argv[])
                 break;
             case 's':
                 sscanf(optarg, "%u", &ctx->buffer_samples);
+                break;
+            case 'p':
+                ctx->oscilloscope = 1;
                 break;
             case 'w':
                 if (!strcmp(optarg, "triangle"))
